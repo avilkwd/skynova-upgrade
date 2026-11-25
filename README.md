@@ -8,7 +8,7 @@ Live app: https://skynova-upgrade-shop.aweichman.chatgpt.site
 
 1. Open the private app and sign in with an authorized ChatGPT account.
 2. Set the shop name, contact details, tax rate, and invoice terms in **Shop settings**.
-3. Add a customer, then add their vehicle from **Vehicles** or the customer profile.
+3. Add a customer and their first vehicle together in the **New customer** form. Both records save together. Uncheck **Add their first vehicle** to save only a customer; additional vehicles can be added from **Vehicles** or the customer profile.
 4. Create a job, enter parts and labor, and save an estimate or invoice.
 5. Search globally by name, formatted or unformatted phone number, car, plate, VIN, part description, part number, or job notes. Open a customer and use **Search this customer’s history** to find, for example, their brake repairs. Filter further by car.
 6. Open a document to print/save a PDF, convert an estimate to an invoice, or record a payment already received.

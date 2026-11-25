@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { calculate, required, optional, date, integer, searchTerms, like, InputError } from '../../../lib/core.mjs';
+import { calculate, required, optional, date, integer, searchTerms, like, vehicleValues, InputError } from '../../../lib/core.mjs';
 export const dynamic = 'force-dynamic';
 const response=(data:any,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 function db(){if(!env.DB)throw new Error('Database unavailable.'); return env.DB;}
@@ -37,12 +37,16 @@ export async function POST(req:Request){try{
     case 'customer':{
       const cid=b.id||id(),name=required(b.name,'Customer name'),phone=required(b.phone,'Phone number',50),digits=phone.replace(/\D/g,''); if(digits.length<7||digits.length>15)throw new InputError('Enter a phone number with 7–15 digits.');
       const values=[name,phone,digits,optional(b.email,200),optional(b.address,500),optional(b.notes)];
-      if(b.id){result=await d.prepare('UPDATE customers SET name=?,phone=?,phone_digits=?,email=?,address=?,notes=? WHERE id=?').bind(...values,cid).run();if(!result.meta.changes)return response({error:'Customer no longer exists.'},404);}else await d.prepare('INSERT INTO customers(name,phone,phone_digits,email,address,notes,id,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(...values,cid,now()).run();return response({id:cid});}
+      if(b.id){result=await d.prepare('UPDATE customers SET name=?,phone=?,phone_digits=?,email=?,address=?,notes=? WHERE id=?').bind(...values,cid).run();if(!result.meta.changes)return response({error:'Customer no longer exists.'},404);return response({id:cid});}
+      const firstVehicle=b.vehicle==null?null:vehicleValues(b.vehicle);
+      const vehicleId=firstVehicle?id():null;
+      const inserts=[d.prepare('INSERT INTO customers(name,phone,phone_digits,email,address,notes,id,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(...values,cid,now())];
+      if(firstVehicle)inserts.push(d.prepare('INSERT INTO vehicles(year,make,model,plate,vin,color,notes,id,customer_id) VALUES(?,?,?,?,?,?,?,?,?)').bind(...firstVehicle,vehicleId,cid));
+      await d.batch(inserts);
+      return response({id:cid,vehicleId});}
     case 'vehicle':{
       const vid=b.id||id();if(!await d.prepare('SELECT id FROM customers WHERE id=?').bind(b.customerId).first())throw new InputError('Choose an existing customer.');
-      const values=[optional(b.year,4),required(b.make,'Make',80),required(b.model,'Model',80),optional(b.plate,30).toUpperCase(),optional(b.vin,17).toUpperCase(),optional(b.color,50),optional(b.notes)];
-      if(values[0]&&!/^\d{4}$/.test(values[0]))throw new InputError('Enter a four-digit vehicle year.');
-      if(values[4]&&!/^[A-HJ-NPR-Z0-9]{17}$/.test(values[4]))throw new InputError('VIN must contain 17 valid characters.');
+      const values=vehicleValues(b);
       if(b.id){result=await d.prepare('UPDATE vehicles SET year=?,make=?,model=?,plate=?,vin=?,color=?,notes=? WHERE id=? AND customer_id=?').bind(...values,vid,b.customerId).run();if(!result.meta.changes)return response({error:'Vehicle not found.'},404);}else await d.prepare('INSERT INTO vehicles(year,make,model,plate,vin,color,notes,id,customer_id) VALUES(?,?,?,?,?,?,?,?,?)').bind(...values,vid,b.customerId).run();return response({id:vid});}
     case 'job':{
       const vehicle=await d.prepare('SELECT * FROM vehicles WHERE id=? AND customer_id=?').bind(b.vehicleId,b.customerId).first(); if(!vehicle)throw new InputError('Choose a vehicle belonging to this customer.');

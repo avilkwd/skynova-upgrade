@@ -6,6 +6,7 @@ import ts from 'typescript';
 const sqlite=new DatabaseSync(':memory:');
 for(const file of ['0000_white_starjammers.sql','0001_clever_sprite.sql']) sqlite.exec(readFileSync(new URL('../drizzle/'+file,import.meta.url),'utf8'));
 const adapter={prepare(sql){let args=[];return {bind(...values){args=values;return this},async first(){return sqlite.prepare(sql).get(...args)||null},async all(){return {results:sqlite.prepare(sql).all(...args)}},async run(){const r=sqlite.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}}}}}};
+adapter.batch=async statements=>{sqlite.exec('BEGIN');try{const results=[];for(const statement of statements)results.push(await statement.run());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}};
 globalThis.__shopTestEnv={DB:adapter};
 const source=readFileSync(new URL('../app/api/shop/route.ts',import.meta.url),'utf8').replace("import { env } from 'cloudflare:workers';","const env = globalThis.__shopTestEnv;").replace("'../../../lib/core.mjs'",JSON.stringify(new URL('../lib/core.mjs',import.meta.url).href));
 const compiled=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
@@ -40,3 +41,16 @@ test('shared records: lookup, customer-scoped parts, vehicle ownership, revision
 });
 
 test('production API rejects missing platform identity', async()=>{const r=await GET(new Request('https://shop.example/api/shop'));assert.equal(r.status,400);assert.match((await r.json()).error,/sign in/)});
+
+test('customer signup saves the first vehicle together, validates before writing, and rolls back both on failure',async()=>{
+ const body={action:'customer',name:'Combined Signup',phone:'(732) 555-0144',vehicle:{year:'2021',make:'Honda',model:'Odyssey',plate:'abc123',vin:'',color:'White',notes:'First family vehicle'}};
+ const saved=await request(body);assert.equal(saved.status,200);assert.ok(saved.vehicleId);
+ const state=await get();const c=state.customers.find(c=>c.id===saved.id);const v=state.vehicles.find(v=>v.id===saved.vehicleId);
+ assert.equal(c.name,'Combined Signup');assert.equal(v.customer_id,c.id);assert.equal(v.make,'Honda');assert.equal(v.plate,'ABC123');assert.equal(v.notes,'First family vehicle');
+ const invalid=await request({...body,name:'Invalid Combined Signup',vehicle:{...body.vehicle,vin:'INVALID'}});assert.equal(invalid.status,400);
+ assert.equal((await get()).customers.some(c=>c.name==='Invalid Combined Signup'),false);
+ sqlite.exec("CREATE TEMP TRIGGER reject_test_vehicle BEFORE INSERT ON vehicles WHEN NEW.make='Fail insert' BEGIN SELECT RAISE(ABORT,'Test failure'); END");
+ try{const failed=await request({...body,name:'Rollback Combined Signup',vehicle:{...body.vehicle,make:'Fail insert'}});assert.equal(failed.status,500);assert.equal((await get()).customers.some(c=>c.name==='Rollback Combined Signup'),false);}finally{sqlite.exec('DROP TRIGGER reject_test_vehicle')}
+ const edit=await request({action:'customer',id:saved.id,name:'Edited Combined Signup',phone:'(732) 555-0144'});assert.equal(edit.status,200);
+ assert.equal((await get()).vehicles.filter(v=>v.customer_id===saved.id).length,1);
+});
