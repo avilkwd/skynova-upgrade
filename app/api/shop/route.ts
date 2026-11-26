@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { calculate, required, optional, date, integer, searchTerms, like, vehicleValues, InputError } from '../../../lib/core.mjs';
+import { calculate, required, optional, date, integer, searchTerms, like, vehicleValues, taxMillis, InputError } from '../../../lib/core.mjs';
 export const dynamic = 'force-dynamic';
 const response=(data:any,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 function db(){if(!env.DB)throw new Error('Database unavailable.'); return env.DB;}
@@ -22,7 +22,7 @@ export async function GET(req:Request){try{
   const [payments,credits]=await Promise.all([d.prepare('SELECT * FROM payments WHERE job_id=? ORDER BY date DESC').bind(j.id).all(),d.prepare("SELECT id,number,date,status,total_cents FROM jobs WHERE source_invoice_id=? AND kind='Credit Note' ORDER BY date DESC,created_at DESC").bind(j.id).all()]);
   return response({job:serialize(j),payments:payments.results,credits:credits.results});
  }
- if(p.has('backup')){const result:any={format:'shop-desk-v1',exportedAt:now()};for(const table of ['customers','vehicles','jobs','payments','settings'])result[table]=(await d.prepare(`SELECT * FROM ${table}`).all()).results;return new Response(JSON.stringify(result,null,2),{headers:{'Content-Type':'application/json','Content-Disposition':`attachment; filename="shop-desk-backup-${today()}.json"`,'Cache-Control':'no-store'}});}
+ if(p.has('backup')){const result:any={format:'shop-desk-v1',exportedAt:now()};for(const table of ['customers','vehicles','jobs','payments','payment_changes','settings'])result[table]=(await d.prepare(`SELECT * FROM ${table}`).all()).results;return new Response(JSON.stringify(result,null,2),{headers:{'Content-Type':'application/json','Content-Disposition':`attachment; filename="shop-desk-backup-${today()}.json"`,'Cache-Control':'no-store'}});}
  const clauses:string[]=[],args:any[]=[];
  for(const term of searchTerms(p.get('q'))){const digits=term.replace(/\D/g,'');clauses.push(`(lower(c.name||' '||c.phone||' '||c.email||' '||v.year||' '||v.make||' '||v.model||' '||v.plate||' '||v.vin||' '||j.title||' '||j.notes||' '||j.number) LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM json_each(j.items) i WHERE lower(json_extract(i.value,'$.description')||' '||json_extract(i.value,'$.partNumber')) LIKE ? ESCAPE '\\')${digits.length>=3?" OR c.phone_digits LIKE ? ESCAPE '\\'":''})`);args.push(like(term),like(term));if(digits.length>=3)args.push(like(digits));}
  for(const [key,col] of [['customer','customer_id'],['vehicle','vehicle_id'],['kind','kind']] as const)if(p.get(key)){clauses.push('j.'+col+'=?');args.push(p.get(key));}
@@ -68,30 +68,32 @@ export async function POST(req:Request){try{
       const vehicle=await d.prepare('SELECT * FROM vehicles WHERE id=? AND customer_id=?').bind(b.vehicleId,b.customerId).first();if(!vehicle)throw new InputError('Choose a vehicle belonging to this customer.');
       const credit=b.kind==='Credit Note';
       if(!['Estimate','Invoice','Credit Note'].includes(b.kind)||(!credit&&!['Draft','Sent','Approved','In progress','Completed','Declined'].includes(b.status)))throw new InputError('Choose a valid document type and status.');
-      const calc=calculate(b.items,b.taxBps),creationId=b.creationId==null?null:required(b.creationId,'Draft identifier',36);
+      const defaultMillis=b.taxRate==null?integer(b.taxBps,'tax rate',0,2500)*10:taxMillis(b.taxRate);
+      if(!Array.isArray(b.items))throw new InputError('Add at least one line item.');
+      const calc=calculate(b.items.map((item:any)=>({...item,taxRate:item.taxRate??defaultMillis/1000})),Math.round(defaultMillis/10)),creationId=b.creationId==null?null:required(b.creationId,'Draft identifier',36);
       if(creationId&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(creationId))throw new InputError('Invalid draft identifier.');
       const jid=b.id||creationId||id();
-      const values=[b.customerId,b.vehicleId,b.kind,credit?'Issued':b.status,date(b.date),b.dueDate?date(b.dueDate):'',b.mileage===''||b.mileage==null?null:integer(b.mileage,'mileage',0,10000000),required(b.title,'Job title',300),optional(b.notes),JSON.stringify(calc.items),calc.taxBps,calc.totalCents];
+      const values=[b.customerId,b.vehicleId,b.kind,credit?'Issued':b.status,date(b.date),b.dueDate?date(b.dueDate):'',b.mileage===''||b.mileage==null?null:integer(b.mileage,'mileage',0,10000000),required(b.title,'Job title',300),optional(b.notes),JSON.stringify(calc.items),calc.taxBps,calc.totalCents,defaultMillis];
       const existingDraft=async()=>{
         if(!creationId||b.id)return null;
         const previous:any=await d.prepare('SELECT * FROM jobs WHERE id=?').bind(jid).first();if(!previous)return null;
-        const fields=['customer_id','vehicle_id','kind','status','date','due_date','mileage','title','notes','items','tax_bps','total_cents'];
+        const fields=['customer_id','vehicle_id','kind','status','date','due_date','mileage','title','notes','items','tax_bps','total_cents','tax_millis'];
         if(fields.every((field,n)=>previous[field]===values[n])&&(previous.source_invoice_id||null)===(credit?b.sourceInvoiceId:null))return response({id:jid});
         return response({error:'This draft was already saved or changed. Reload the saved document before editing it.'},409);
       };
       const previous=await existingDraft();if(previous)return previous;
       if(b.id){
         // Issued credit notes are immutable. Paid invoices can be corrected without changing ownership or removing recorded money.
-        result=await d.prepare(`UPDATE jobs AS j SET customer_id=?,vehicle_id=?,kind=?,status=?,date=?,due_date=?,mileage=?,title=?,notes=?,items=?,tax_bps=?,total_cents=?,revision=revision+1 WHERE id=? AND revision=? AND kind!='Credit Note' AND archived_at IS NULL AND deleted_at IS NULL AND (?=0) AND (MAX(${paidSql()},${creditedSql()})<=?) AND ((${paidSql()}+${creditedSql()}=0) OR (kind=? AND customer_id=? AND vehicle_id=?))`).bind(...values,jid,integer(b.revision,'revision',1,1000000000),credit?1:0,calc.totalCents,b.kind,b.customerId,b.vehicleId).run();
+        result=await d.prepare(`UPDATE jobs AS j SET customer_id=?,vehicle_id=?,kind=?,status=?,date=?,due_date=?,mileage=?,title=?,notes=?,items=?,tax_bps=?,total_cents=?,tax_millis=?,revision=revision+1 WHERE id=? AND revision=? AND kind!='Credit Note' AND archived_at IS NULL AND deleted_at IS NULL AND (?=0) AND (MAX(${paidSql()},${creditedSql()})<=?) AND ((${paidSql()}+${creditedSql()}=0) OR (kind=? AND customer_id=? AND vehicle_id=?))`).bind(...values,jid,integer(b.revision,'revision',1,1000000000),credit?1:0,calc.totalCents,b.kind,b.customerId,b.vehicleId).run();
         if(!result.meta.changes)return response({error:'Document changed, is archived/deleted, or the edit conflicts with recorded payments or credits. Reload and check it.'},409);
       }else{
         const number=(credit?'CN-':'RO-')+jid.replace(/-/g,'').slice(0,10).toUpperCase();
         if(credit){
           if(calc.totalCents<=0)throw new InputError('A credit note must have a positive amount.');
           const sourceId=required(b.sourceInvoiceId,'Original invoice');
-          result=await d.prepare(`INSERT OR IGNORE INTO jobs(customer_id,vehicle_id,kind,status,date,due_date,mileage,title,notes,items,tax_bps,total_cents,id,number,created_at,source_invoice_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM jobs j WHERE j.id=? AND j.kind='Invoice' AND j.customer_id=? AND j.vehicle_id=? AND j.archived_at IS NULL AND j.deleted_at IS NULL AND j.total_cents-${creditedSql()}>=?`).bind(...values,jid,number,now(),sourceId,sourceId,b.customerId,b.vehicleId,calc.totalCents).run();
+          result=await d.prepare(`INSERT OR IGNORE INTO jobs(customer_id,vehicle_id,kind,status,date,due_date,mileage,title,notes,items,tax_bps,total_cents,tax_millis,id,number,created_at,source_invoice_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM jobs j WHERE j.id=? AND j.kind='Invoice' AND j.customer_id=? AND j.vehicle_id=? AND j.archived_at IS NULL AND j.deleted_at IS NULL AND j.total_cents-${creditedSql()}>=?`).bind(...values,jid,number,now(),sourceId,sourceId,b.customerId,b.vehicleId,calc.totalCents).run();
           if(!result.meta.changes){const retried=await existingDraft();if(retried)return retried;return response({error:'Credit exceeds the remaining invoice amount, or the original invoice changed or is archived/deleted. Reload the invoice.'},409);}
-        }else await d.prepare('INSERT INTO jobs(customer_id,vehicle_id,kind,status,date,due_date,mileage,title,notes,items,tax_bps,total_cents,id,number,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(...values,jid,number,now()).run();
+        }else await d.prepare('INSERT INTO jobs(customer_id,vehicle_id,kind,status,date,due_date,mileage,title,notes,items,tax_bps,total_cents,tax_millis,id,number,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(...values,jid,number,now()).run();
       }
       return response({id:jid});}
     case 'document_action':{
@@ -115,7 +117,23 @@ export async function POST(req:Request){try{
     case 'payment':{
       const cents=integer(b.amountCents,'payment amount',1,10000000000);if(!['Cash','Check','Card','Bank transfer','Other'].includes(b.method))throw new InputError('Choose a payment method.');
       result=await d.prepare(`INSERT INTO payments(id,job_id,amount_cents,date,method,note) SELECT ?,j.id,?,?,?,? FROM jobs j WHERE j.id=? AND j.kind='Invoice' AND j.archived_at IS NULL AND j.deleted_at IS NULL AND j.total_cents-${paidSql()}-${creditedSql()}>=?`).bind(id(),cents,date(b.date),b.method,optional(b.note),b.jobId,cents).run();if(!result.meta.changes)return response({error:'Payment exceeds the current balance, or this invoice is archived/deleted. Reload and check the balance.'},409);return response({ok:true});}
-    case 'settings':{await d.prepare("INSERT INTO settings(id,name,phone,address,email,terms,tax_bps) VALUES('shop',?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,email=excluded.email,terms=excluded.terms,tax_bps=excluded.tax_bps").bind(required(b.name,'Shop name'),optional(b.phone,50),optional(b.address,500),optional(b.email,200),optional(b.terms),integer(b.taxBps,'tax rate',0,2500)).run();return response({ok:true});}
+    case 'payment_edit':{
+      const paymentId=required(b.id,'Payment'),jobId=required(b.jobId,'Invoice'),revision=integer(b.revision,'payment revision',1,1000000000);
+      const cents=integer(b.amountCents,'payment amount',1,10000000000),paymentDate=date(b.date),note=optional(b.note),changedAt=now();
+      if(!['Cash','Check','Card','Bank transfer','Other'].includes(b.method))throw new InputError('Choose a payment method.');
+      // Both statements run in one transaction; the same guard controls the audit entry and update.
+      const condition=`p.id=? AND p.job_id=? AND p.revision=? AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=p.job_id AND j.kind='Invoice' AND j.archived_at IS NULL AND j.deleted_at IS NULL AND ?<=MAX(p.amount_cents,j.total_cents-${creditedSql()}-COALESCE((SELECT SUM(other.amount_cents) FROM payments other WHERE other.job_id=j.id AND other.id!=p.id),0)))`;
+      const guard=[paymentId,jobId,revision,cents];
+      const after=JSON.stringify({amount_cents:cents,date:paymentDate,method:b.method,note,revision:revision+1});
+      const results=await d.batch([
+        d.prepare(`INSERT INTO payment_changes(id,payment_id,before_json,after_json,changed_at,actor_id) SELECT ?,p.id,json_object('amount_cents',p.amount_cents,'date',p.date,'method',p.method,'note',p.note,'revision',p.revision),?,?,? FROM payments p WHERE ${condition}`).bind(id(),after,changedAt,req.headers.get('oai-authenticated-user-id'),...guard),
+        d.prepare(`UPDATE payments AS p SET amount_cents=?,date=?,method=?,note=?,revision=revision+1,updated_at=? WHERE ${condition}`).bind(cents,paymentDate,b.method,note,changedAt,...guard)
+      ]);
+      if(!results[1].meta.changes)return response({error:'Payment changed on another computer, exceeds the available invoice balance, or belongs to an archived/deleted invoice. Reload the invoice and try again.'},409);
+      return response({ok:true,revision:revision+1});}
+    case 'settings':{
+      const millis=b.taxRate==null?integer(b.taxBps,'tax rate',0,2500)*10:taxMillis(b.taxRate);
+      await d.prepare("INSERT INTO settings(id,name,phone,address,email,terms,tax_bps,tax_millis) VALUES('shop',?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,email=excluded.email,terms=excluded.terms,tax_bps=excluded.tax_bps,tax_millis=excluded.tax_millis").bind(required(b.name,'Shop name'),optional(b.phone,50),optional(b.address,500),optional(b.email,200),optional(b.terms),Math.round(millis/10),millis).run();return response({ok:true});}
     default:throw new InputError('Unknown action.');
   }
 }catch(e:any){return response({error:e instanceof InputError?e.message:e instanceof SyntaxError?'Invalid request.':'Could not save. Please try again.'},e instanceof InputError||e instanceof SyntaxError?400:500);}}

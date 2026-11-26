@@ -15,7 +15,7 @@ export function InvoiceActions({job,onAction,readOnly=false,busy=false}:{job:any
  {item('duplicate','Duplicate',Copy,readOnly||credit,'Creates a new unsaved draft without payments or credits.')}
  {item('send','Send',Mail,true,'Email sending is paused for now.')}
  {job.kind==='Invoice'&&item('credit','Convert to Credit Note',FileMinus2,readOnly||inactive||job.total_cents-(job.credited_cents||0)<=0)}
- {job.kind==='Invoice'&&item('payment','Record Payment',Wallet,readOnly||inactive||balance(job)<=0)}
+ {job.kind==='Invoice'&&item('payment',balance(job)>0?'Record Payment':'View/Edit Payments',Wallet,readOnly||inactive)}
  {item('pdf','Download/Print PDF',FileDown)}
  <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={sub} disabled={readOnly||inactive||busy} onClick={()=>setSub(!sub)}><RefreshCw size={18}/><span>Change Status to:</span><ChevronRight size={15}/></button>
  {sub&&<div className="action-status-options" role="group" aria-label="Choose document status">{(credit?['Void']:['Draft','Sent','Approved','In progress','Completed','Declined']).map(value=><button role="menuitem" key={value} disabled={credit&&job.status==='Void'} onClick={()=>run('status',value)}>{value}</button>)}{!credit&&<p>Paid and Partial follow recorded payments and credits.</p>}</div>}

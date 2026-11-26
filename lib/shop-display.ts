@@ -12,3 +12,5 @@ export function status(j:any){
  if(j.kind==='Invoice'&&j.status!=='Draft'&&j.due_date&&j.due_date<today()&&balance(j)>0)return 'Late';return j.status;
 }
 export const daysOld=(date:string)=>Math.max(0,Math.round((Date.parse(today()+'T12:00:00')-Date.parse(date+'T12:00:00'))/86400000));
+
+export const defaultTaxRate=(record:any)=>record?.tax_millis==null?(record?.tax_bps||0)/100:record.tax_millis/1000;

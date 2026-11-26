@@ -13,9 +13,13 @@ Live app: https://skynova-upgrade-shop.aweichman.chatgpt.site
 5. On an invoice or estimate, use **Find Customer by Phone** under **To** to select a customer by a full or partial phone number; their vehicle and contact details fill in automatically. Search globally by name, formatted or unformatted phone number, car, plate, VIN, part description, part number, or job notes. Open a customer and use **Search within this customer** to find, for example, their brake repairs. Filter further by car.
 6. Use the dropdown next to a document for Edit, View, Duplicate, Convert to Credit Note, Record Payment, Download/Print PDF, Change Status, Archive, and Delete. Send remains disabled as requested. PDF opens the browser print dialog, where you can choose Save as PDF.
 
-All authorized computers share one D1 database. Lists refresh every 20 seconds and after a save. Job edits use revision checks; invoice edits retain payments and cannot reduce the total below recorded payments or issued credits, or reassign those records to a different owner. Issued credit notes are immutable. Payments cannot exceed the current invoice balance. Money uses integer cents; quantities support up to three decimals. The default tax rate is 0 until configured. Individual lines support rates with up to three decimal places, including 6.625%; existing documents retain their recorded rate and totals.
+All authorized computers share one D1 database. Lists refresh every 20 seconds and after a save. Job edits use revision checks; invoice edits retain payments and cannot reduce the total below recorded payments or issued credits, or reassign those records to a different owner. Issued credit notes are immutable. Payments cannot exceed the current invoice balance. Money uses integer cents; quantities support up to three decimals. The default tax rate is 0 until configured. Shop and document defaults, as well as individual lines, support three decimal places, including 6.625%. Defaults retain their precision when Settings or saved documents are reopened; existing records retain their rates and totals.
 
 **Explore Sample Shop** displays fictional, read-only data in the browser without writing it to the shop database. Real records start empty. **Export Backup** downloads a JSON snapshot; automated backups and an in-app restore workflow are not included.
+
+## Editing recorded payments
+
+Open an invoice and choose **Payments** (or **Record Payment** while a balance remains). Click **Edit** beside the recorded payment to correct its date, amount, receiving account, or notes, then click **Save Changes**. This updates the same payment and recalculates the invoice balance; it does not move funds. Edits use revision checks and an atomic before/after audit history, included in Export Backup. Archived or deleted invoices must be restored/unarchived before changing their payments.
 
 ## Invoice actions
 

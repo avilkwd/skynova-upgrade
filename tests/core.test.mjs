@@ -8,3 +8,7 @@ test('rejects negative and non-finite quantities, fractions of cents, invalid ta
 test('calendar dates are real dates',()=>{assert.equal(date('2024-02-29'),'2024-02-29');for(const d of ['2026-02-29','2026-02-30','bad','2026-13-01'])assert.throws(()=>date(d))});
 test('search limits terms and escapes SQL wildcard characters',()=>{assert.deepEqual(searchTerms(' Daniel   BRAKES '),['daniel','brake']);assert.equal(like('BP_12%'),'%BP\\_12\\%%')});
 test('screenshot tax example: two $245 brake pads at 6.625% total $522.46',()=>{const r=calculate([{...part,quantity:2,rateCents:24500,taxRate:6.625}],0);assert.equal(r.subtotalCents,49000);assert.equal(r.taxCents,3246);assert.equal(r.totalCents,52246);assert.equal(r.items[0].taxRate,6.625);for(const taxRate of [-1,25.001,NaN,'',6.6255])assert.throws(()=>calculate([{...part,taxRate}],0));});
+test('default tax rates preserve three decimal places and reject excess precision',async()=>{
+ const {taxMillis}=await import('../lib/core.mjs');assert.equal(taxMillis('6.625'),6625);assert.equal(taxMillis('6.6'),6600);assert.equal(taxMillis(0),0);assert.equal(taxMillis(25),25000);
+ for(const value of ['6.6251',-1,25.001,'',null,true,[],Infinity])assert.throws(()=>taxMillis(value));
+});

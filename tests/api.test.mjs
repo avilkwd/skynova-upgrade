@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import ts from 'typescript';
 const sqlite=new DatabaseSync(':memory:');
-for(const file of ['0000_white_starjammers.sql','0001_clever_sprite.sql','0002_ancient_major_mapleleaf.sql']) sqlite.exec(readFileSync(new URL('../drizzle/'+file,import.meta.url),'utf8'));
+for(const file of ['0000_white_starjammers.sql','0001_clever_sprite.sql','0002_ancient_major_mapleleaf.sql','0003_clear_blazing_skull.sql']) sqlite.exec(readFileSync(new URL('../drizzle/'+file,import.meta.url),'utf8'));
 const adapter={prepare(sql){let args=[];return {bind(...values){args=values;return this},async first(){return sqlite.prepare(sql).get(...args)||null},async all(){return {results:sqlite.prepare(sql).all(...args)}},async run(){const r=sqlite.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}}}}}};
 adapter.batch=async statements=>{sqlite.exec('BEGIN');try{const results=[];for(const statement of statements)results.push(await statement.run());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}};
 globalThis.__shopTestEnv={DB:adapter};
@@ -120,4 +120,44 @@ test('retrying the same saved credit draft does not apply the credit twice',asyn
  const body={...f.payload,creationId,kind:'Credit Note',status:'Issued',sourceInvoiceId:f.id,items:[{...f.payload.items[0],rateCents:2000}]};
  const first=await request(body),retry=await request(body);assert.equal(first.status,200);assert.equal(retry.status,200);assert.equal(retry.id,first.id);assert.equal((await fresh(f.id)).credited_cents,2000);
  assert.equal((await request({...body,notes:'A different version of the saved draft'})).status,409);
+});
+test('three-decimal default tax persists and supplies the exact rate to new and reopened documents',async()=>{
+ assert.equal((await request({action:'settings',name:'Tax Precision Shop',taxRate:'6.625'})).status,200);
+ const settings=(await get()).settings;assert.equal(settings.tax_millis,6625);
+ const f=await actionFixture();const body={...f.payload,taxRate:'6.625',taxBps:663,items:[{description:'Brake pads',partNumber:'BP',type:'Part',quantity:2,rateCents:24500,taxable:true}]};
+ const saved=await request(body);assert.equal(saved.status,200);let job=await fresh(saved.id);assert.equal(job.tax_millis,6625);assert.equal(job.items[0].taxRate,6.625);assert.equal(job.total_cents,52246);
+ assert.equal((await request({action:'settings',name:'Tax Precision Shop',taxRate:'7.125'})).status,200);job=await fresh(saved.id);assert.equal(job.tax_millis,6625);assert.equal(job.total_cents,52246);
+ assert.equal((await request({...body,id:job.id,revision:job.revision,notes:'Reopened invoice'})).status,200);assert.equal((await fresh(job.id)).total_cents,52246);
+ const bad=await request({action:'settings',name:'Tax Precision Shop',taxRate:'6.6251'});assert.equal(bad.status,400);assert.equal((await get()).settings.tax_millis,7125);
+});
+test('recorded payment edits update the same row, balance, and audit entry; stale or excessive edits do not write',async()=>{
+ const f=await actionFixture(10000);
+ for(const amountCents of [4000,2000])assert.equal((await request({action:'payment',jobId:f.id,amountCents,date:'2026-11-25',method:'Cash'})).status,200);
+ const p=(await get('job='+f.id)).payments.find(p=>p.amount_cents===4000);
+ const body={action:'payment_edit',id:p.id,jobId:f.id,revision:p.revision,amountCents:3000,date:'2026-11-24',method:'Check',note:'Corrected amount and reference'};
+ assert.equal((await request(body)).status,200);let detail=await get('job='+f.id),updated=detail.payments.find(x=>x.id===p.id);
+ assert.equal(detail.payments.length,2);assert.equal(detail.job.paid_cents,5000);assert.equal(updated.amount_cents,3000);assert.equal(updated.method,'Check');assert.equal(updated.date,'2026-11-24');assert.equal(updated.note,body.note);assert.equal(updated.revision,2);assert.ok(updated.updated_at);
+ let history=sqlite.prepare('SELECT * FROM payment_changes WHERE payment_id=?').all(p.id);assert.equal(history.length,1);assert.equal(JSON.parse(history[0].before_json).amount_cents,4000);assert.equal(JSON.parse(history[0].after_json).amount_cents,3000);
+ assert.equal((await request({...body,amountCents:3500})).status,409);
+ assert.equal((await request({...body,revision:2,amountCents:8001})).status,409);
+ const other=await actionFixture();assert.equal((await request({...body,revision:2,jobId:other.id})).status,409);
+ assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM payment_changes WHERE payment_id=?').get(p.id).n,1);assert.equal((await fresh(f.id)).paid_cents,5000);
+ assert.equal((await docAction(f.id,'archive')).status,200);assert.equal((await request({...body,revision:2})).status,409);assert.equal((await docAction(f.id,'unarchive')).status,200);
+ assert.equal((await request({...body,revision:2,amountCents:8000})).status,200);assert.equal((await fresh(f.id)).paid_cents,10000);
+});
+test('fully paid and credited invoices allow payment corrections without increasing existing overpayments',async()=>{
+ const f=await actionFixture(10000);await request({action:'payment',jobId:f.id,amountCents:10000,date:'2026-11-25',method:'Cash'});
+ const p=(await get('job='+f.id)).payments[0];const edit={action:'payment_edit',id:p.id,jobId:f.id,revision:1,amountCents:10000,date:'2026-11-25',method:'Card',note:'Correct method'};
+ assert.equal((await request(edit)).status,200);
+ assert.equal((await request({...f.payload,kind:'Credit Note',sourceInvoiceId:f.id,status:'Issued'})).status,200);
+ assert.equal((await request({...edit,revision:2,note:'Credit already issued'})).status,200);
+ assert.equal((await request({...edit,revision:3,amountCents:10001})).status,409);
+ assert.equal((await request({...edit,revision:3,amountCents:5000})).status,200);
+ const row=await fresh(f.id);assert.equal(row.paid_cents,5000);assert.equal(row.credited_cents,10000);
+ assert.equal((await request({...edit,revision:4,amountCents:0})).status,400);
+});
+test('payment audit and edit roll back together if the update fails',async()=>{
+ const f=await actionFixture(10000);await request({action:'payment',jobId:f.id,amountCents:2000,date:'2026-11-25',method:'Cash'});const p=(await get('job='+f.id)).payments[0];
+ sqlite.exec("CREATE TEMP TRIGGER fail_payment_edit BEFORE UPDATE ON payments WHEN NEW.note='Forced rollback' BEGIN SELECT RAISE(ABORT,'Local test failure'); END");
+ try{const r=await request({action:'payment_edit',id:p.id,jobId:f.id,revision:p.revision,amountCents:1000,date:'2026-11-25',method:'Cash',note:'Forced rollback'});assert.equal(r.status,500);assert.equal((await fresh(f.id)).paid_cents,2000);assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM payment_changes WHERE payment_id=?').get(p.id).n,0);}finally{sqlite.exec('DROP TRIGGER fail_payment_edit')}
 });
