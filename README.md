@@ -7,15 +7,15 @@ Live app: https://skynova-upgrade-shop.aweichman.chatgpt.site
 ## Use it
 
 1. Open the private app and sign in with an authorized ChatGPT account.
-2. Set the shop name, contact details, tax rate, and invoice terms in **Shop settings**.
+2. Set the shop name, contact details, tax rate, and invoice terms in **Settings**.
 3. Add a customer and their first vehicle together in the **New customer** form. Both records save together. Uncheck **Add their first vehicle** to save only a customer; additional vehicles can be added from **Vehicles** or the customer profile.
-4. Create a job, enter parts and labor, and save an estimate or invoice.
-5. Search globally by name, formatted or unformatted phone number, car, plate, VIN, part description, part number, or job notes. Open a customer and use **Search this customer’s history** to find, for example, their brake repairs. Filter further by car.
+4. Open **Sales → New Invoice** or **Estimates → New Estimate**. The full-page editor follows the supplied Skynova references: From / To blocks, compact item rows, line taxes, notes, and totals.
+5. Search globally by name, formatted or unformatted phone number, car, plate, VIN, part description, part number, or job notes. Open a customer and use **Search within this customer** to find, for example, their brake repairs. Filter further by car.
 6. Open a document to print/save a PDF, convert an estimate to an invoice, or record a payment already received.
 
-All authorized computers share one D1 database. Lists refresh every 20 seconds and after a save. Job edits use revision checks; paid documents are locked against editing. Payments cannot exceed the current invoice balance. Money uses integer cents; quantities support up to three decimals. The tax rate defaults to 0 until configured.
+All authorized computers share one D1 database. Lists refresh every 20 seconds and after a save. Job edits use revision checks; paid documents are locked against editing. Payments cannot exceed the current invoice balance. Money uses integer cents; quantities support up to three decimals. The default tax rate is 0 until configured. Individual lines support rates with up to three decimal places, including 6.625%; existing documents retain their recorded rate and totals.
 
-**Explore a sample shop** displays fictional, read-only data in the browser without writing it to the shop database. Real records start empty. **Export backup** downloads a JSON snapshot; automated backups and an in-app restore workflow are not included.
+**Explore Sample Shop** displays fictional, read-only data in the browser without writing it to the shop database. Real records start empty. **Export Backup** downloads a JSON snapshot; automated backups and an in-app restore workflow are not included.
 
 ## Scope
 
@@ -39,6 +39,6 @@ npx tsc --noEmit
 npm run build
 ```
 
-Schema: `db/schema.ts`; append migrations with `npm run db:generate`. UI: `app/page.tsx` and `app/globals.css`. API: `app/api/shop/route.ts`. Money and validation: `lib/core.mjs`.
+Schema: `db/schema.ts`; append migrations with `npm run db:generate`. UI: `app/page.tsx`, `app/shop-documents.tsx`, and `app/globals.css`. API: `app/api/shop/route.ts`. Money and validation: `lib/core.mjs`.
 
 The checked-in `.openai/hosting.json` identifies the hosted Site. Build output and local database state are ignored. Publish through the Sites version/deployment workflow, preserving that identity and private access policy. Source is also mirrored into this GitHub repository.

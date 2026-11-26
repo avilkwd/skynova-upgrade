@@ -20,15 +20,25 @@ export async function GET(req:Request){try{
   const clauses:string[]=[];const args:any[]=[];
   for(const term of searchTerms(p.get('q'))){const digits=term.replace(/\D/g,'');clauses.push(`(lower(c.name||' '||c.phone||' '||c.email||' '||v.year||' '||v.make||' '||v.model||' '||v.plate||' '||v.vin||' '||j.title||' '||j.notes||' '||j.number) LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM json_each(j.items) i WHERE lower(json_extract(i.value,'$.description')||' '||json_extract(i.value,'$.partNumber')) LIKE ? ESCAPE '\\')${digits.length>=3?" OR c.phone_digits LIKE ? ESCAPE '\\'":''})`);args.push(like(term),like(term));if(digits.length>=3)args.push(like(digits));}
   for(const [key,col] of [['customer','customer_id'],['vehicle','vehicle_id'],['kind','kind']] as const)if(p.get(key)){clauses.push('j.'+col+'=?');args.push(p.get(key));}
+  const paid="COALESCE((SELECT SUM(amount_cents) FROM payments WHERE job_id=j.id),0)";
+  if(p.get('status')&&p.get('status')!=='All'){
+    const day=p.get('today')?date(p.get('today')):today();
+    clauses.push(`(CASE WHEN j.kind='Invoice' AND j.total_cents>0 AND ${paid}>=j.total_cents THEN 'Paid' WHEN ${paid}>0 THEN 'Partial' WHEN j.kind='Invoice' AND j.status!='Draft' AND j.due_date!='' AND j.due_date<? AND j.total_cents>${paid} THEN 'Late' ELSE j.status END)=?`);args.push(day,p.get('status'));
+  }
+  if(p.get('from')){clauses.push('j.date>=?');args.push(date(p.get('from')));}
+  if(p.get('to')){clauses.push('j.date<=?');args.push(date(p.get('to')));}
   const where=clauses.length?' WHERE '+clauses.join(' AND '):'';
   const all=p.get('all')==='1';
+  const limit=p.get('limit')?integer(p.get('limit'),'page size',1,100):100;
+  const offset=p.get('offset')?integer(p.get('offset'),'page offset',0,10000000):0;
+  const sort=p.get('sort')==='oldest'?'ASC':'DESC';
   const [customers,vehicles,jobs,settings,stats,count]=await Promise.all([
     d.prepare('SELECT * FROM customers ORDER BY name COLLATE NOCASE').all(),d.prepare('SELECT * FROM vehicles ORDER BY year DESC').all(),
-    d.prepare(jobSelect+where+' ORDER BY j.date DESC,j.created_at DESC'+(all?'':' LIMIT 100')).bind(...args).all(),
+    d.prepare(jobSelect+where+` ORDER BY j.date ${sort},j.created_at ${sort}`+(all?'':` LIMIT ${limit} OFFSET ${offset}`)).bind(...args).all(),
     d.prepare("SELECT * FROM settings WHERE id='shop'").first(),
     d.prepare("SELECT COUNT(*) documents, COALESCE(SUM(CASE WHEN kind='Invoice' THEN total_cents - COALESCE((SELECT SUM(amount_cents) FROM payments WHERE job_id=jobs.id),0) ELSE 0 END),0) outstanding, SUM(CASE WHEN status='In progress' THEN 1 ELSE 0 END) active FROM jobs").first(),
-    d.prepare('SELECT COUNT(*) n FROM jobs j JOIN customers c ON c.id=j.customer_id JOIN vehicles v ON v.id=j.vehicle_id'+where).bind(...args).first()
-  ]);return response({customers:customers.results,vehicles:vehicles.results,jobs:jobs.results.map(serialize),settings:settings||{name:'ANR Empire',phone:'',address:'',email:'',terms:'',tax_bps:0},stats,count:count?.n||0});
+    d.prepare(`SELECT COUNT(*) n,COALESCE(SUM(j.total_cents),0) total,COALESCE(SUM(CASE WHEN j.kind='Invoice' THEN j.total_cents-${paid} ELSE 0 END),0) balance FROM jobs j JOIN customers c ON c.id=j.customer_id JOIN vehicles v ON v.id=j.vehicle_id`+where).bind(...args).first()
+  ]);return response({customers:customers.results,vehicles:vehicles.results,jobs:jobs.results.map(serialize),settings:settings||{name:'ANR Empire',phone:'',address:'',email:'',terms:'',tax_bps:0},stats,count:count?.n||0,totals:{total:count?.total||0,balance:count?.balance||0}});
 }catch(e:any){return response({error:e instanceof InputError?e.message:'Unable to load shop records. Please try again.'},e instanceof InputError?400:500);}}
 export async function POST(req:Request){try{
   protect(req);if(Number(req.headers.get('content-length'))>300000)return response({error:'Request too large.'},413);

@@ -54,3 +54,16 @@ test('customer signup saves the first vehicle together, validates before writing
  const edit=await request({action:'customer',id:saved.id,name:'Edited Combined Signup',phone:'(732) 555-0144'});assert.equal(edit.status,200);
  assert.equal((await get()).vehicles.filter(v=>v.customer_id===saved.id).length,1);
 });
+test('invoice list supports status, dates, pagination and matching totals with precise line tax',async()=>{
+ const c=await request({action:'customer',name:'Classic List Test',phone:'7325550119'});
+ const v=await request({action:'vehicle',customerId:c.id,year:'2012',make:'Kia',model:'Sedona'});
+ const payload={action:'job',customerId:c.id,vehicleId:v.id,kind:'Invoice',status:'Draft',date:'2026-11-21',dueDate:'2026-11-25',title:'Brake pad test',taxBps:0,items:[{description:'Brake pad',partNumber:'P245',type:'Part',quantity:2,rateCents:24500,taxRate:6.625,taxable:true}]};
+ const a=await request(payload),b=await request({...payload,date:'2026-11-25',title:'Second visit'});assert.equal(a.status,200);assert.equal(b.status,200);
+ const root='customer='+c.id+'&kind=Invoice';
+ let list=await get(root+'&limit=1');assert.equal(list.count,2);assert.equal(list.jobs.length,1);assert.equal(list.jobs[0].id,b.id);assert.equal(list.totals.total,104492);assert.equal(list.totals.balance,104492);
+ list=await get(root+'&limit=1&offset=1');assert.equal(list.jobs[0].id,a.id);
+ list=await get(root+'&from=2026-11-24&to=2026-11-25');assert.equal(list.count,1);assert.equal(list.jobs[0].id,b.id);
+ assert.equal((await request({action:'payment',jobId:a.id,amountCents:52246,date:'2026-11-25',method:'Cash'})).status,200);
+ list=await get(root+'&status=Paid');assert.equal(list.count,1);assert.equal(list.jobs[0].id,a.id);assert.equal(list.totals.balance,0);
+ list=await get(root+'&status=Draft');assert.equal(list.count,1);assert.equal(list.jobs[0].id,b.id);
+});
