@@ -49,7 +49,7 @@ export default function Shop(){
  }
  const patch=(key:string,value:any)=>setForm((f:any)=>({...f,[key]:value}));
  function openEditor(kind='Invoice',existing?:any){if(demo){setNotice('Sample records are read-only. Exit the sample shop to create or edit a document.');return;}
-  const cid=existing?.customer_id||customer||customers[0]?.id||'',vid=existing?.vehicle_id||vehicle||vehicles.find((v:any)=>v.customer_id===cid)?.id||'';
+  const cid=existing?.customer_id||customer||'',vid=existing?.vehicle_id||vehicle||vehicles.find((v:any)=>v.customer_id===cid)?.id||'';
   setEditor(existing?{...existing,creationId:existing.id?undefined:crypto.randomUUID(),customerId:cid,vehicleId:vid,taxRate:defaultTaxRate(existing),dueDate:existing.due_date||'',items:existing.items.map((i:any)=>({...i,price:(i.rateCents/100).toFixed(2),taxRate:i.taxRate??defaultTaxRate(existing)}))}:{creationId:crypto.randomUUID(),kind,status:'Draft',customerId:cid,vehicleId:vid,date:today(),dueDate:today(),mileage:'',title:'',notes:'',taxRate:defaultTaxRate(data.settings),items:[{description:'',partNumber:'',type:'Part',quantity:1,price:'',taxable:true,taxRate:defaultTaxRate(data.settings)}]});setDetail(null);setEditorPreview(false);setError('');window.scrollTo(0,0);
  }
  async function post(body:any){const r=await fetch('/api/shop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),json:any=await r.json();if(!r.ok)throw Error(json.error);return json;}
