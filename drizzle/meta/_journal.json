@@ -15,6 +15,13 @@
       "when": 1795572617073,
       "tag": "0001_clever_sprite",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795668025554,
+      "tag": "0002_ancient_major_mapleleaf",
+      "breakpoints": true
     }
   ]
 }

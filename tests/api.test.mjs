@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import ts from 'typescript';
 const sqlite=new DatabaseSync(':memory:');
-for(const file of ['0000_white_starjammers.sql','0001_clever_sprite.sql']) sqlite.exec(readFileSync(new URL('../drizzle/'+file,import.meta.url),'utf8'));
+for(const file of ['0000_white_starjammers.sql','0001_clever_sprite.sql','0002_ancient_major_mapleleaf.sql']) sqlite.exec(readFileSync(new URL('../drizzle/'+file,import.meta.url),'utf8'));
 const adapter={prepare(sql){let args=[];return {bind(...values){args=values;return this},async first(){return sqlite.prepare(sql).get(...args)||null},async all(){return {results:sqlite.prepare(sql).all(...args)}},async run(){const r=sqlite.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}}}}}};
 adapter.batch=async statements=>{sqlite.exec('BEGIN');try{const results=[];for(const statement of statements)results.push(await statement.run());sqlite.exec('COMMIT');return results;}catch(error){sqlite.exec('ROLLBACK');throw error;}};
 globalThis.__shopTestEnv={DB:adapter};
@@ -66,4 +66,58 @@ test('invoice list supports status, dates, pagination and matching totals with p
  assert.equal((await request({action:'payment',jobId:a.id,amountCents:52246,date:'2026-11-25',method:'Cash'})).status,200);
  list=await get(root+'&status=Paid');assert.equal(list.count,1);assert.equal(list.jobs[0].id,a.id);assert.equal(list.totals.balance,0);
  list=await get(root+'&status=Draft');assert.equal(list.count,1);assert.equal(list.jobs[0].id,b.id);
+});
+async function actionFixture(total=10000){
+ const c=await request({action:'customer',name:'Actions '+crypto.randomUUID().slice(0,6),phone:'7325550166'});
+ const v=await request({action:'vehicle',customerId:c.id,year:'2020',make:'Honda',model:'Accord'});
+ const payload={action:'job',customerId:c.id,vehicleId:v.id,kind:'Invoice',status:'Draft',date:'2026-11-25',dueDate:'2099-01-01',title:'Action fixture',notes:'',taxBps:0,items:[{description:'Repair',partNumber:'TEST',type:'Labor',quantity:1,rateCents:total,taxable:false}]};
+ const saved=await request(payload);assert.equal(saved.status,200);return {payload,id:saved.id,customerId:c.id,vehicleId:v.id};
+}
+async function fresh(id){return (await get('job='+id)).job;}
+async function docAction(id,operation,extra={}){const job=await fresh(id);return request({action:'document_action',id,revision:job.revision,operation,...extra});}
+test('archive, deleted view, restore and status changes preserve records and reject stale actions',async()=>{
+ const f=await actionFixture();const initial=await fresh(f.id);
+ assert.equal((await docAction(f.id,'status',{status:'Sent'})).status,200);assert.equal((await fresh(f.id)).status,'Sent');
+ assert.equal((await request({action:'document_action',operation:'archive',id:f.id,revision:initial.revision})).status,409);
+ assert.equal((await docAction(f.id,'archive')).status,200);
+ assert.equal((await get('customer='+f.customerId)).count,0);assert.equal((await get('customer='+f.customerId+'&status=Archived')).jobs[0].id,f.id);
+ assert.equal((await request({action:'payment',jobId:f.id,amountCents:1,date:'2026-11-25',method:'Cash'})).status,409);
+ assert.equal((await docAction(f.id,'unarchive')).status,200);assert.equal((await docAction(f.id,'delete')).status,200);
+ assert.equal((await get('customer='+f.customerId)).count,0);assert.equal((await get('customer='+f.customerId+'&status=Deleted')).count,1);
+ assert.equal((await docAction(f.id,'restore')).status,200);assert.equal((await get('customer='+f.customerId)).count,1);
+ assert.equal((await docAction(f.id,'status',{status:'Paid'})).status,400);assert.equal((await fresh(f.id)).paid_cents,0);
+});
+test('credit notes retain tax, cap credits atomically, reduce balance and cap new payments',async()=>{
+ const f=await actionFixture(10000);
+ const credit={...f.payload,kind:'Credit Note',sourceInvoiceId:f.id,status:'Issued',title:'Credit for repair',items:[{description:'Returned part',partNumber:'',type:'Part',quantity:1,rateCents:6000,taxable:false}]};
+ const results=await Promise.all([request(credit),request(credit)]);assert.deepEqual(results.map(x=>x.status).sort(),[200,409]);
+ const cn=results.find(x=>x.status===200);const original=await fresh(f.id),creditNote=await fresh(cn.id);
+ assert.equal(original.total_cents,10000);assert.equal(original.credited_cents,6000);assert.equal(creditNote.source_invoice_id,f.id);assert.equal(creditNote.source_number,original.number);assert.equal(creditNote.status,'Issued');assert.equal((await get('job='+f.id)).credits.length,1);
+ assert.equal((await request({action:'payment',jobId:f.id,amountCents:4001,date:'2026-11-25',method:'Cash'})).status,409);
+ assert.equal((await request({action:'payment',jobId:f.id,amountCents:4000,date:'2026-11-25',method:'Cash'})).status,200);
+ assert.equal((await get('customer='+f.customerId+'&kind=Invoice&status=Settled')).count,1);
+ assert.equal((await request({...credit,id:cn.id,revision:creditNote.revision})).status,409);
+ assert.equal((await docAction(cn.id,'delete')).status,409);
+ assert.equal((await docAction(cn.id,'archive')).status,200);assert.equal((await fresh(f.id)).credited_cents,6000);
+ assert.equal((await docAction(cn.id,'unarchive')).status,200);assert.equal((await docAction(cn.id,'status',{status:'Void'})).status,200);assert.equal((await fresh(f.id)).credited_cents,0);
+ assert.equal((await docAction(cn.id,'delete')).status,200);assert.equal((await docAction(cn.id,'restore')).status,200);assert.equal((await fresh(cn.id)).status,'Void');assert.equal((await fresh(f.id)).credited_cents,0);
+});
+test('paid invoice edits preserve payments; paid credit notes show a credit owed and cannot be assigned to another customer',async()=>{
+ const f=await actionFixture(10000);assert.equal((await request({action:'payment',jobId:f.id,amountCents:10000,date:'2026-11-25',method:'Cash'})).status,200);
+ let row=await fresh(f.id);assert.equal((await request({...f.payload,id:f.id,revision:row.revision,notes:'Corrected note'})).status,200);
+ row=await fresh(f.id);assert.equal(row.paid_cents,10000);assert.equal(row.notes,'Corrected note');
+ assert.equal((await request({...f.payload,id:f.id,revision:row.revision,items:[{...f.payload.items[0],rateCents:9999}]})).status,409);
+ const other=await actionFixture();assert.equal((await request({...f.payload,id:f.id,revision:row.revision,customerId:other.customerId,vehicleId:other.vehicleId})).status,409);
+ const cn=await request({...f.payload,kind:'Credit Note',sourceInvoiceId:f.id,status:'Issued',title:'Full credit'});assert.equal(cn.status,200);
+ row=await fresh(f.id);assert.equal(row.paid_cents,10000);assert.equal(row.credited_cents,10000);
+ assert.equal((await get('customer='+f.customerId+'&kind=Invoice&status=Credited')).count,1);
+ assert.equal((await request({...f.payload,id:f.id,revision:row.revision,notes:'Corrected after credit'})).status,200);
+ assert.equal((await request({...f.payload,kind:'Credit Note',sourceInvoiceId:f.id,customerId:other.customerId,vehicleId:other.vehicleId})).status,409);
+ const copied=await request({...f.payload,title:'Duplicate draft'});assert.equal(copied.status,200);const copy=await fresh(copied.id);assert.equal(copy.paid_cents,0);assert.equal(copy.credited_cents,0);assert.equal(copy.source_invoice_id,null);assert.notEqual(copy.number,row.number);
+});
+test('retrying the same saved credit draft does not apply the credit twice',async()=>{
+ const f=await actionFixture(10000),creationId=crypto.randomUUID();
+ const body={...f.payload,creationId,kind:'Credit Note',status:'Issued',sourceInvoiceId:f.id,items:[{...f.payload.items[0],rateCents:2000}]};
+ const first=await request(body),retry=await request(body);assert.equal(first.status,200);assert.equal(retry.status,200);assert.equal(retry.id,first.id);assert.equal((await fresh(f.id)).credited_cents,2000);
+ assert.equal((await request({...body,notes:'A different version of the saved draft'})).status,409);
 });
